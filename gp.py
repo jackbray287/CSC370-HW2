@@ -2,6 +2,7 @@ import random
 import copy
 import math
 import statistics
+import time
 import pandas as pd
 from Tree import Tree, random_tree, print_equation_string
 
@@ -174,6 +175,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
     Returns the best tree and a history (one entry per generation) for plotting.
     """
     multi = len(variables) > 1
+    start = time.time()                     # clock starts before seeding, so seeding time counts
 
     # generation 0: a few correlation seeds + random trees for the rest
     rows = random.sample(train, sample_size)
@@ -194,7 +196,9 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
         history.append({"best": scores[best_i],
                         "mean": sum(finite) / len(finite) if finite else float('inf'),
                         "diversity": unique / pop_size,
-                        "size": len(population[best_i].to_list())})
+                        "size": len(population[best_i].to_list()),
+                        "tree": population[best_i],         # best tree this generation (for plotting)
+                        "time": time.time() - start})       # seconds since the run started
         if verbose and (gen % 10 == 0 or gen == generations - 1):
             h = history[-1]
             print(f"  gen {gen:3d}  best {h['best']:.4f}  mean {h['mean']:.3f}  "
