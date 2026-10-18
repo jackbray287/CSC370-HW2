@@ -16,7 +16,6 @@ class Tree:
         self.data = data     
         self.left = None
         self.right = None
-        self.repairs = 0  # keep track of manual overrides
 
     def is_leaf(self):
         if self.left == None and self.right == None:
@@ -24,36 +23,40 @@ class Tree:
         else:
             return False
         
-    def calculate_value(self, x_list):   
+    def calculate_value(self, x_list, notepad=None):   
         # x_list is one row of inputs, like [x1, x2, x3].
+        # notepad: optional [count] handed in by fitness; each repair adds 1 to it (the tree itself never changes)
         # recursive: trickle down the operator nodes to the children, evaluates its children, then combines them                    
         if self.data == "*":
-            return self.left.calculate_value(x_list) * self.right.calculate_value(x_list)
+            return self.left.calculate_value(x_list, notepad) * self.right.calculate_value(x_list, notepad)
         if self.data == "/":
-            num = self.left.calculate_value(x_list)
-            den = self.right.calculate_value(x_list)
+            num = self.left.calculate_value(x_list, notepad)
+            den = self.right.calculate_value(x_list, notepad)
             if den == 0:         # protected division: x/0 returns x (Koza returns 1) so trees never crash
-                self.repairs += 1
+                if notepad is not None:
+                    notepad[0] += 1
                 return num       
             return num / den     
         if self.data == "-":
-            return self.left.calculate_value(x_list) - self.right.calculate_value(x_list)
+            return self.left.calculate_value(x_list, notepad) - self.right.calculate_value(x_list, notepad)
         if self.data == "+":
-            return self.left.calculate_value(x_list) + self.right.calculate_value(x_list)
+            return self.left.calculate_value(x_list, notepad) + self.right.calculate_value(x_list, notepad)
         if self.data in VARS:                            
             return x_list[VARS.index(self.data)]               
         if self.data == "sin":
-            return math.sin(self.left.calculate_value(x_list))
+            return math.sin(self.left.calculate_value(x_list, notepad))
         if self.data == "log":
-            val = self.left.calculate_value(x_list)
+            val = self.left.calculate_value(x_list, notepad)
             if val <= 0:         # protected log: about half of dataset 3's x values are <= 0, so GP can exploit this
-                self.repairs += 1
+                if notepad is not None:
+                    notepad[0] += 1
                 return 0.0       
             return math.log(val) 
         if self.data == "^":
-            val = self.left.calculate_value(x_list)
+            val = self.left.calculate_value(x_list, notepad)
             if val > 50:         # cap exp at e^50 to prevent overflow
-                self.repairs += 1
+                if notepad is not None:
+                    notepad[0] += 1
                 val = 50         
             return math.exp(val) 
         else:

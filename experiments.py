@@ -12,11 +12,12 @@ from gp import load_data, fitness, run_gp
 
 OUT_DIR = "experiments"
 
-# dataset number -> (file, variables, use unary functions?)
+# dataset number -> (file, variables, use unary functions?, repair penalty weight)
+# repair weight is 0 where repairs are rare (only + - * /); dataset 3's log/exp get patched a lot
 DATASETS = {
-    "1": ("data/dataset1.csv", ["x1"], False),
-    "2": ("data/dataset2.csv", VARS, False),
-    "3": ("data/dataset3.csv", ["x1"], True),
+    "1": ("data/dataset1.csv", ["x1"], False, 0),
+    "2": ("data/dataset2.csv", VARS, False, 0),
+    "3": ("data/dataset3.csv", ["x1"], True, 0.1),      # -> KNOB
 }
 
 def compare_seeding(name, runs=5, generations=50, seed=0, threshold=0.02):
@@ -26,7 +27,7 @@ def compare_seeding(name, runs=5, generations=50, seed=0, threshold=0.02):
 
     threshold: "converged" means the best fitness reached this value (same target for both modes)
     """
-    filename, variables, unary = DATASETS[name]
+    filename, variables, unary, repair_weight = DATASETS[name]
     random.seed(seed)                            # same seed -> same split and same results each time
     train, test = load_data(filename)
 
@@ -34,7 +35,7 @@ def compare_seeding(name, runs=5, generations=50, seed=0, threshold=0.02):
     for label, n_seeds in (("seeded", 5), ("unseeded", 0)):
         for r in range(runs):
             best, history = run_gp(train, variables, unary=unary, generations=generations,
-                                   n_seeds=n_seeds, verbose=False)
+                                   n_seeds=n_seeds, repair_weight=repair_weight, verbose=False)
             test_error = fitness(best, test, weight=0)    # test set: only used here, after training
             formula = print_equation_string(best.print_equation())
             gens, secs = time_to_threshold(history, threshold)
@@ -202,12 +203,13 @@ def save_csv(name, results):
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["mode", "run", "final_best_fitness", "test_error", "final_diversity",
-                         "gens_to_threshold", "secs_to_threshold", "total_secs", "formula"])
+                         "gens_to_threshold", "secs_to_threshold", "total_secs", "final_repair_rate", "formula"])
         for label, runs in results.items():
             for r, run in enumerate(runs):
                 last = run["history"][-1]
                 writer.writerow([label, r + 1, last["best"], run["test_error"], last["diversity"],
-                                 run["gens_to_threshold"], run["secs_to_threshold"], last["time"], run["formula"]])
+                                 run["gens_to_threshold"], run["secs_to_threshold"], last["time"],
+                                 last["repairs"], run["formula"]])
     print(f"saved {path}")
 
 def main():

@@ -25,12 +25,33 @@ def load_data(filename, test_size=5000):
     train = rows[test_size:]
     return train, test
 
-def fitness(tree, rows, weight=0.001):
+def evaluate(tree, rows):
+    """
+    Run the tree on every row. Returns (mean squared error, fraction of rows that needed a repair).
+    The repair count lives on a fresh notepad made here, not on the tree, so it starts at 0 every time.
+    """
+    notepad = [0]
+    total = 0
+    repaired_rows = 0
+    try:
+        for inputs, answer in rows:
+            before = notepad[0]
+            guess = tree.calculate_value(inputs, notepad)
+            total += (guess - answer) ** 2
+            if notepad[0] > before:     # this row needed at least one protected operation
+                repaired_rows += 1
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return float('inf'), 1.0        # tree blew up (e.g. sin(inf)): worst possible error
+    return total / len(rows), repaired_rows / len(rows)
+
+def fitness(tree, rows, weight=0.001, repair_weight=0):
     """
     How wrong this tree is on the given rows (lower is better, like tour length).
 
-    fitness = normalized MSE + weight * tree size
+    fitness = normalized MSE + weight * tree size + repair_weight * fraction of rows repaired
       normalized MSE: 0 = perfect, 1 = no better than always guessing the average answer
+      repair_weight: 0 = ignore repairs (datasets 1, 2); > 0 punishes trees that lean on
+                     protected log / exp / division instead of real math (dataset 3)
     """
     # average answer and how spread out the answers are (variance)
     answers = []
@@ -44,19 +65,11 @@ def fitness(tree, rows, weight=0.001):
     if variance == 0:               # every answer is the same: avoid dividing by zero
         variance = 1
 
-    # mean squared error of the tree's guesses
-    try:
-        total = 0
-        for inputs, answer in rows:
-            guess = tree.calculate_value(inputs)
-            total += (guess - answer) ** 2
-    except (ValueError, OverflowError, ZeroDivisionError):
-        return float('inf')         # tree blew up (e.g. sin(inf)): worst possible score
-    mse = total / len(rows)
+    mse, repair_rate = evaluate(tree, rows)
 
     # dividing by variance puts every dataset on the same scale, so one size penalty works for all
     # the size penalty is the regularization: bigger trees cost more, which fights bloat and overfitting
-    score = mse / variance + weight * len(tree.to_list())
+    score = mse / variance + weight * len(tree.to_list()) + repair_weight * repair_rate
     if not math.isfinite(score):    # inf or nan: worst possible score
         return float('inf')
     return score
@@ -129,7 +142,7 @@ def tune_constants(tree, score, step=1.0, min_step=0.001, max_rounds=200):
             s = s / 2
     return child
 
-def seed_trees(rows, variables, top=5, weight=0.001):
+def seed_trees(rows, variables, top=5, weight=0.001, repair_weight=0):
     """
     Starter trees for generation 0, picked by correlation (guides GP, doesn't replace it).
 
@@ -164,12 +177,12 @@ def seed_trees(rows, variables, top=5, weight=0.001):
     seeds = []
     for r, a, g, k in scored[:top]:
         tree = node("+", node("*", node(a), g), node(k))          # a * g(x - h) + k
-        seeds.append(tune_constants(tree, lambda t: fitness(t, rows, weight)))
+        seeds.append(tune_constants(tree, lambda t: fitness(t, rows, weight, repair_weight)))
     return seeds
 
 def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_size=500,
            mutation_prob=0.1, crossover_prob=0.6, method="power", p=0.5,
-           weight=0.001, n_seeds=5, max_depth=10, verbose=True):
+           weight=0.001, repair_weight=0, n_seeds=5, max_depth=10, verbose=True):
     """
     One full GP run (same shape as the TSP loop). Uses only the training rows.
     Returns the best tree and a history (one entry per generation) for plotting.
@@ -179,7 +192,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
 
     # generation 0: a few correlation seeds + random trees for the rest
     rows = random.sample(train, sample_size)
-    population = seed_trees(rows, variables, top=n_seeds, weight=weight) if n_seeds > 0 else []
+    population = seed_trees(rows, variables, top=n_seeds, weight=weight, repair_weight=repair_weight) if n_seeds > 0 else []
     while len(population) < pop_size:
         population.append(random_tree(Unary=unary, Multi=multi))
 
@@ -187,7 +200,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
     for gen in range(generations):
         # fresh sample each generation; every tree in this generation is scored on the same rows
         rows = random.sample(train, sample_size)
-        scores = [fitness(t, rows, weight) for t in population]
+        scores = [fitness(t, rows, weight, repair_weight) for t in population]
         best_i = min(range(pop_size), key=lambda i: scores[i])
 
         # track progress and diversity (share of trees that are unique formulas)
@@ -198,7 +211,8 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
                         "diversity": unique / pop_size,
                         "size": len(population[best_i].to_list()),
                         "tree": population[best_i],         # best tree this generation (for plotting)
-                        "time": time.time() - start})       # seconds since the run started
+                        "time": time.time() - start,       # seconds since the run started
+                        "repairs": evaluate(population[best_i], rows)[1]})   # share of rows the best tree needed patched
         if verbose and (gen % 10 == 0 or gen == generations - 1):
             h = history[-1]
             print(f"  gen {gen:3d}  best {h['best']:.4f}  mean {h['mean']:.3f}  "
@@ -224,7 +238,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
 
     # final pick: score the last generation on a bigger training sample
     rows = random.sample(train, min(2000, len(train)))
-    best = min(population, key=lambda t: fitness(t, rows, weight))
+    best = min(population, key=lambda t: fitness(t, rows, weight, repair_weight))
     return best, history
 
 def main():
