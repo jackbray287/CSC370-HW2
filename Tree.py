@@ -11,11 +11,20 @@ U_OPS = {"sin": sp.sin, "log": sp.log, "^": sp.exp}
 # var names
 VARS = ["x1", "x2", "x3"]            
 
+def random_constant(LogConst=False):
+    # LogConst=False: the usual -5..5 rounded to two decimals (datasets 1 and 3)
+    # LogConst=True:  log scale, so 1e-11 is as likely as 10; dataset 2's constant is ~6.7e-11,
+    #                 which a -5..5 draw can never produce
+    if LogConst:
+        return random.choice([-1, 1]) * 10 ** random.uniform(-12, 1)
+    return round(random.uniform(-5, 5), 2)
+
 class Tree:
     def __init__(self, data):
         self.data = data     
         self.left = None
         self.right = None
+        self.repairs = 0  # keep track of manual overrides
 
     def is_leaf(self):
         if self.left == None and self.right == None:
@@ -23,40 +32,36 @@ class Tree:
         else:
             return False
         
-    def calculate_value(self, x_list, notepad=None):   
+    def calculate_value(self, x_list):   
         # x_list is one row of inputs, like [x1, x2, x3].
-        # notepad: optional [count] handed in by fitness; each repair adds 1 to it (the tree itself never changes)
         # recursive: trickle down the operator nodes to the children, evaluates its children, then combines them                    
         if self.data == "*":
-            return self.left.calculate_value(x_list, notepad) * self.right.calculate_value(x_list, notepad)
+            return self.left.calculate_value(x_list) * self.right.calculate_value(x_list)
         if self.data == "/":
-            num = self.left.calculate_value(x_list, notepad)
-            den = self.right.calculate_value(x_list, notepad)
+            num = self.left.calculate_value(x_list)
+            den = self.right.calculate_value(x_list)
             if den == 0:         # protected division: x/0 returns x (Koza returns 1) so trees never crash
-                if notepad is not None:
-                    notepad[0] += 1
+                self.repairs += 1
                 return num       
             return num / den     
         if self.data == "-":
-            return self.left.calculate_value(x_list, notepad) - self.right.calculate_value(x_list, notepad)
+            return self.left.calculate_value(x_list) - self.right.calculate_value(x_list)
         if self.data == "+":
-            return self.left.calculate_value(x_list, notepad) + self.right.calculate_value(x_list, notepad)
+            return self.left.calculate_value(x_list) + self.right.calculate_value(x_list)
         if self.data in VARS:                            
             return x_list[VARS.index(self.data)]               
         if self.data == "sin":
-            return math.sin(self.left.calculate_value(x_list, notepad))
+            return math.sin(self.left.calculate_value(x_list))
         if self.data == "log":
-            val = self.left.calculate_value(x_list, notepad)
+            val = self.left.calculate_value(x_list)
             if val <= 0:         # protected log: about half of dataset 3's x values are <= 0, so GP can exploit this
-                if notepad is not None:
-                    notepad[0] += 1
+                self.repairs += 1
                 return 0.0       
             return math.log(val) 
         if self.data == "^":
-            val = self.left.calculate_value(x_list, notepad)
+            val = self.left.calculate_value(x_list)
             if val > 50:         # cap exp at e^50 to prevent overflow
-                if notepad is not None:
-                    notepad[0] += 1
+                self.repairs += 1
                 val = 50         
             return math.exp(val) 
         else:
@@ -91,7 +96,7 @@ class Tree:
         return random.choice(self.to_list())
     
     
-    def mutate(self, Multi=False):
+    def mutate(self, Multi=False, LogConst=False):
         """
         Return a *new* Tree that is a mutated version of this tree.
 
@@ -116,7 +121,7 @@ class Tree:
             node.data = random.choice(valid_U_ops)
         elif node.data in VARS:
             if random.random() < .5 or len(pool) == 1:      # -> KNOB
-                node.data = round(random.uniform(-5,5),2)
+                node.data = random_constant(LogConst)
             else:
                 valid_vars = []
                 for v in pool:
@@ -127,7 +132,7 @@ class Tree:
             if random.random() < .4:                        # -> KNOB
                 node.data = random.choice(pool)
             else:
-                node.data = round(random.uniform(-5,5),2)
+                node.data = random_constant(LogConst)
         return child
     
     def crossover(self, other):
@@ -172,25 +177,25 @@ class Tree:
                 crnode.left = ornode
         return child
         
-def random_tree(depth=3, Unary=False, Multi=False):
+def random_tree(depth=3, Unary=False, Multi=False, LogConst=False):
     # "grow" method: stop at max depth, or 30% of the time at any level, so tree shapes vary
     if depth == 0 or random.random() < 0.3:
-        return random_leaf(Multi)
+        return random_leaf(Multi, LogConst)
     if Unary == True and random.random() < .3:          # -> KNOB
         root = Tree(random.choice(list(U_OPS)))
-        root.left = random_tree(depth - 1, Unary, Multi)
+        root.left = random_tree(depth - 1, Unary, Multi, LogConst)
         return root
     root = Tree(random.choice(list(OPS)))
-    root.left = random_tree(depth - 1, Unary, Multi)
-    root.right = random_tree(depth - 1, Unary, Multi)
+    root.left = random_tree(depth - 1, Unary, Multi, LogConst)
+    root.right = random_tree(depth - 1, Unary, Multi, LogConst)
     return root
-def random_leaf(Multi=False):
+def random_leaf(Multi=False, LogConst=False):
     if random.random() <= 0.5:
         if Multi:
             return Tree(random.choice(VARS))
         else:
             return Tree(VARS[0])
-    return Tree(round(random.uniform(-5, 5), 2))
+    return Tree(random_constant(LogConst))
 def print_equation_string(equation):
     def evaluate(node):
         if len(node) == 1:

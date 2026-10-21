@@ -12,31 +12,33 @@ from gp import load_data, fitness, run_gp
 
 OUT_DIR = "experiments"
 
-# dataset number -> (file, variables, use unary functions?, repair penalty weight)
-# repair weight is 0 where repairs are rare (only + - * /); dataset 3's log/exp get patched a lot
+# dataset number -> (file, variables, use unary functions?, log-scale constants?, relative error?, generations)
 DATASETS = {
-    "1": ("data/dataset1.csv", ["x1"], False, 0),
-    "2": ("data/dataset2.csv", VARS, False, 0),
-    "3": ("data/dataset3.csv", ["x1"], True, 0.1),      # -> KNOB
+    "1": ("data/dataset1.csv", ["x1"], False, False, False, 100),    # converges well inside 100
+    "2": ("data/dataset2.csv", VARS, False, True, True, 300),    # constant ~6.7e-11 needs log-scale draws; y spans 0..1e11 so use relative error
+    "3": ("data/dataset3.csv", ["x1"], True, False, False, 500),   # progress only starts after ~150 gens
 }
 
-def compare_seeding(name, runs=5, generations=50, seed=0, threshold=0.02):
+def compare_seeding(name, runs=5, generations=None, seed=0, threshold=0.02):
     """
     Run GP `runs` times with correlation seeds and `runs` times without,
     on the same train/test split. Saves plots and a CSV to experiments/.
 
     threshold: "converged" means the best fitness reached this value (same target for both modes)
+    generations: None = use the dataset's own setting from DATASETS
     """
-    filename, variables, unary, repair_weight = DATASETS[name]
+    filename, variables, unary, log_const, relative, default_generations = DATASETS[name]
+    if generations is None:
+        generations = default_generations
     random.seed(seed)                            # same seed -> same split and same results each time
     train, test = load_data(filename)
 
     results = {"seeded": [], "unseeded": []}
     for label, n_seeds in (("seeded", 5), ("unseeded", 0)):
         for r in range(runs):
-            best, history = run_gp(train, variables, unary=unary, generations=generations,
-                                   n_seeds=n_seeds, repair_weight=repair_weight, verbose=False)
-            test_error = fitness(best, test, weight=0)    # test set: only used here, after training
+            best, history = run_gp(train, variables, unary=unary, log_const=log_const, relative=relative, generations=generations,
+                                   n_seeds=n_seeds, verbose=False)
+            test_error = fitness(best, test, weight=0, relative=relative)    # test set: only used here, after training
             formula = print_equation_string(best.print_equation())
             gens, secs = time_to_threshold(history, threshold)
             results[label].append({"history": history, "test_error": test_error, "formula": formula,
@@ -127,7 +129,7 @@ def save_evolution(name, label, train, history):
     last = len(history) - 1
 
     # snapshot plot: a few generations on one chart, colored early (dark) to late (yellow)
-    snapshots = sorted(set(g for g in (0, 2, 5, 10, 20, last) if g <= last))
+    snapshots = sorted(set(g for g in (0, 2, 5, 10, 20, 50, 100, 200, 300, last) if g <= last))
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.scatter(data_x, data_y, s=4, color="lightgray", label="data")
     for i, g in enumerate(snapshots):
@@ -159,9 +161,15 @@ def save_evolution(name, label, train, history):
         ax.set_title(f"Dataset {name} ({label}): generation {g}, best fitness {history[g]['best']:.4f}")
         return line,
 
-    anim = FuncAnimation(fig, draw, frames=len(history))
+    # about 60 frames no matter how many generations there were (every frame costs a full redraw),
+    # always ending on the last generation
+    step = max(1, len(history) // 60)
+    frames = list(range(0, len(history), step))
+    if frames[-1] != last:
+        frames.append(last)
+    anim = FuncAnimation(fig, draw, frames=frames)
     path = os.path.join(OUT_DIR, f"dataset{name}_{label}_evolution.gif")
-    anim.save(path, writer=PillowWriter(fps=5))
+    anim.save(path, writer=PillowWriter(fps=8))
     plt.close(fig)
     print(f"saved {path}")
 
@@ -203,13 +211,12 @@ def save_csv(name, results):
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["mode", "run", "final_best_fitness", "test_error", "final_diversity",
-                         "gens_to_threshold", "secs_to_threshold", "total_secs", "final_repair_rate", "formula"])
+                         "gens_to_threshold", "secs_to_threshold", "total_secs", "formula"])
         for label, runs in results.items():
             for r, run in enumerate(runs):
                 last = run["history"][-1]
                 writer.writerow([label, r + 1, last["best"], run["test_error"], last["diversity"],
-                                 run["gens_to_threshold"], run["secs_to_threshold"], last["time"],
-                                 last["repairs"], run["formula"]])
+                                 run["gens_to_threshold"], run["secs_to_threshold"], last["time"], run["formula"]])
     print(f"saved {path}")
 
 def main():

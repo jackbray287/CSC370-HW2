@@ -25,38 +25,25 @@ def load_data(filename, test_size=5000):
     train = rows[test_size:]
     return train, test
 
-def evaluate(tree, rows):
-    """
-    Run the tree on every row. Returns (mean squared error, fraction of rows that needed a repair).
-    The repair count lives on a fresh notepad made here, not on the tree, so it starts at 0 every time.
-    """
-    notepad = [0]
-    total = 0
-    repaired_rows = 0
-    try:
-        for inputs, answer in rows:
-            before = notepad[0]
-            guess = tree.calculate_value(inputs, notepad)
-            total += (guess - answer) ** 2
-            if notepad[0] > before:     # this row needed at least one protected operation
-                repaired_rows += 1
-    except (ValueError, OverflowError, ZeroDivisionError):
-        return float('inf'), 1.0        # tree blew up (e.g. sin(inf)): worst possible error
-    return total / len(rows), repaired_rows / len(rows)
-
-def fitness(tree, rows, weight=0.001, repair_weight=0):
+def fitness(tree, rows, weight=0.001, relative=False):
     """
     How wrong this tree is on the given rows (lower is better, like tour length).
 
-    fitness = normalized MSE + weight * tree size + repair_weight * fraction of rows repaired
+    fitness = normalized MSE + weight * tree size
       normalized MSE: 0 = perfect, 1 = no better than always guessing the average answer
-      repair_weight: 0 = ignore repairs (datasets 1, 2); > 0 punishes trees that lean on
-                     protected log / exp / division instead of real math (dataset 3)
+
+    relative=True: measure the error on a log-like scale (asinh: behaves like log for big values,
+      like the plain value near 0, and keeps the sign). Being off by a factor of 2 then costs the
+      same on a row whose answer is 50 as on one whose answer is 1e9. Dataset 2's answers run from
+      ~0 to 1e11, and on the plain scale a handful of giant rows own the whole score.
     """
-    # average answer and how spread out the answers are (variance)
+    def scale(v):
+        return math.asinh(v) if relative else v
+
+    # average answer and how spread out the answers are (variance), on the chosen scale
     answers = []
     for inputs, answer in rows:
-        answers.append(answer)
+        answers.append(scale(answer))
     mean = sum(answers) / len(answers)
     variance = 0
     for answer in answers:
@@ -65,11 +52,19 @@ def fitness(tree, rows, weight=0.001, repair_weight=0):
     if variance == 0:               # every answer is the same: avoid dividing by zero
         variance = 1
 
-    mse, repair_rate = evaluate(tree, rows)
+    # mean squared error of the tree's guesses, on the same scale
+    try:
+        total = 0
+        for (inputs, answer), scaled_answer in zip(rows, answers):
+            guess = scale(tree.calculate_value(inputs))
+            total += (guess - scaled_answer) ** 2
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return float('inf')         # tree blew up (e.g. sin(inf)): worst possible score
+    mse = total / len(rows)
 
     # dividing by variance puts every dataset on the same scale, so one size penalty works for all
     # the size penalty is the regularization: bigger trees cost more, which fights bloat and overfitting
-    score = mse / variance + weight * len(tree.to_list()) + repair_weight * repair_rate
+    score = mse / variance + weight * len(tree.to_list())
     if not math.isfinite(score):    # inf or nan: worst possible score
         return float('inf')
     return score
@@ -100,7 +95,7 @@ def fitness_to_weights(scores, method="power", p=0.5):
         weights = [1] * len(scores)
     return weights
 
-def tune_constants(tree, score, step=1.0, min_step=0.001, max_rounds=200):
+def tune_constants(tree, score, step=1.0, min_step=0.001, max_rounds=200, log_scale=False):
     """
     Return a *new* Tree with the same shape, but with its constants nudged
     to lower score(tree).
@@ -128,7 +123,11 @@ def tune_constants(tree, score, step=1.0, min_step=0.001, max_rounds=200):
         for node in constants:
             original = node.data
             moved = False
-            for candidate in (original + s, original - s):
+            if log_scale:               # multiply/divide instead of add/subtract, so a constant
+                candidates = (original * (1 + s), original / (1 + s))   # can walk across orders of magnitude
+            else:
+                candidates = (original + s, original - s)
+            for candidate in candidates:
                 node.data = candidate
                 new = score(child)
                 if new < best:          # keep the move
@@ -142,7 +141,7 @@ def tune_constants(tree, score, step=1.0, min_step=0.001, max_rounds=200):
             s = s / 2
     return child
 
-def seed_trees(rows, variables, top=5, weight=0.001, repair_weight=0):
+def seed_trees(rows, variables, top=5, weight=0.001, log_const=False, relative=False):
     """
     Starter trees for generation 0, picked by correlation (guides GP, doesn't replace it).
 
@@ -177,12 +176,12 @@ def seed_trees(rows, variables, top=5, weight=0.001, repair_weight=0):
     seeds = []
     for r, a, g, k in scored[:top]:
         tree = node("+", node("*", node(a), g), node(k))          # a * g(x - h) + k
-        seeds.append(tune_constants(tree, lambda t: fitness(t, rows, weight, repair_weight)))
+        seeds.append(tune_constants(tree, lambda t: fitness(t, rows, weight, relative), log_scale=log_const))
     return seeds
 
-def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_size=500,
+def run_gp(train, variables, unary=False, pop_size=200, generations=500, sample_size=500,
            mutation_prob=0.1, crossover_prob=0.6, method="power", p=0.5,
-           weight=0.001, repair_weight=0, n_seeds=5, max_depth=10, verbose=True):
+           weight=0.001, n_seeds=5, max_depth=6, log_const=False, relative=False, verbose=True):
     """
     One full GP run (same shape as the TSP loop). Uses only the training rows.
     Returns the best tree and a history (one entry per generation) for plotting.
@@ -192,15 +191,15 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
 
     # generation 0: a few correlation seeds + random trees for the rest
     rows = random.sample(train, sample_size)
-    population = seed_trees(rows, variables, top=n_seeds, weight=weight, repair_weight=repair_weight) if n_seeds > 0 else []
+    population = seed_trees(rows, variables, top=n_seeds, weight=weight, log_const=log_const, relative=relative) if n_seeds > 0 else []
     while len(population) < pop_size:
-        population.append(random_tree(Unary=unary, Multi=multi))
+        population.append(random_tree(Unary=unary, Multi=multi, LogConst=log_const))
 
     history = []
     for gen in range(generations):
         # fresh sample each generation; every tree in this generation is scored on the same rows
         rows = random.sample(train, sample_size)
-        scores = [fitness(t, rows, weight, repair_weight) for t in population]
+        scores = [fitness(t, rows, weight, relative) for t in population]
         best_i = min(range(pop_size), key=lambda i: scores[i])
 
         # track progress and diversity (share of trees that are unique formulas)
@@ -211,8 +210,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
                         "diversity": unique / pop_size,
                         "size": len(population[best_i].to_list()),
                         "tree": population[best_i],         # best tree this generation (for plotting)
-                        "time": time.time() - start,       # seconds since the run started
-                        "repairs": evaluate(population[best_i], rows)[1]})   # share of rows the best tree needed patched
+                        "time": time.time() - start})       # seconds since the run started
         if verbose and (gen % 10 == 0 or gen == generations - 1):
             h = history[-1]
             print(f"  gen {gen:3d}  best {h['best']:.4f}  mean {h['mean']:.3f}  "
@@ -225,7 +223,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
             parent = random.choices(population, weights)[0]
             flip = random.random()
             if flip < mutation_prob:
-                child = parent.mutate(Multi=multi)
+                child = parent.mutate(Multi=multi, LogConst=log_const)
             elif flip < mutation_prob + crossover_prob:
                 other = random.choices(population, weights)[0]
                 child = parent.crossover(other)
@@ -238,7 +236,7 @@ def run_gp(train, variables, unary=False, pop_size=200, generations=50, sample_s
 
     # final pick: score the last generation on a bigger training sample
     rows = random.sample(train, min(2000, len(train)))
-    best = min(population, key=lambda t: fitness(t, rows, weight, repair_weight))
+    best = min(population, key=lambda t: fitness(t, rows, weight, relative))
     return best, history
 
 def main():
